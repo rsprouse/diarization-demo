@@ -1,6 +1,5 @@
 # Do:
 # conda env create -f environment.yml
-name: diarize
 channels:
   - pytorch
   - conda-forge
@@ -21,7 +20,7 @@ dependencies:
   - sox
   - pip:
     - pympi-ling
-    - pyannote.audio
+    - pyannote.audio==2.1.1
     - speechbrain
     - git+https://github.com/rsprouse/audiolabel
     - git+https://github.com/rsprouse/phonlab
