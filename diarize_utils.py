@@ -1,7 +1,9 @@
 import os, sys, subprocess
 import datetime
 from pathlib import Path
+import librosa
 from phonlab.utils import dir2df
+from audiolabel import LabelManager, IntervalTier, Label
 
 def compare_dirs(dir1, ext1, dir2, ext2):
     '''
@@ -83,8 +85,9 @@ def prep_audio(infile, outfile, chan='-'):
     No value is returned from this function. A CalledProcessError will be raised if
     the sox call fails.
     '''
+    outfile.parent.mkdir(parents=True, exist_ok=True)
     soxargs = [
-        'sox', str(infile), '-r', '16000', str(outfile), 'remix', chan
+        'sox', str(infile), '-r', '16000', str(outfile), 'remix', str(chan)
     ]
     try:
         subprocess.run(soxargs, check=True)
@@ -92,13 +95,73 @@ def prep_audio(infile, outfile, chan='-'):
         msg = f'Error while prepping audio file {infile}:\n{e}'
         raise subprocess.CalledProcessError(msg)
 
-def diarize(wavfile, pipeline, num_spkr, rttmfile):
+#def _iter_eaf(diarization):
+#    for segment, _, label in diarization.itertracks(yield_label=True):
+#        if isinstance(label, Text) and " " in label:
+#                msg = (
+#                    f"Space-separated LAB file format does not allow labels "
+#                    f'containing spaces (got: "{label}").'
+#                )
+#                raise ValueError(msg)
+#            yield f"{segment.start:.3f} {segment.start + segment.duration:.3f} {label}\n"
+
+def write_eaf():
+    eaf = pympi.Elan.Eaf()
+    eaf.remove_tier('default')
+    eaf.add_language('yid')
+    for chan_s, rttmfile in rttms.items():
+        df = rttm2df(rttmfile)
+        for spkr in df['spkr'].cat.categories.sort_values():
+            try:
+                tiername = names[(chan_s, spkr)]
+            except KeyError:
+                tiername = f'{chan_s}_{spkr}'
+            eaf.add_tier(tiername, language='yid')
+            spkrdf = df[df['spkr'] == spkr].copy()
+            if buffer_ms is not None:
+                spkrdf = buffer_tier(spkrdf, buffer_ms)
+            for row in spkrdf.itertuples():
+                eaf.add_annotation(tiername, int(row.t1_buf), int(row.t2_buf))
+    return eaf
+ 
+def write_tg(diarization, dur, handle):
+    tiermap = {
+        n: IntervalTier(name=n, start=0.0, end=dur) \
+            for n in diarization.labels()
+    }
+    for segment, _, label in diarization.itertracks(yield_label=True):
+        labeltier = tiermap[label]
+        labeltier.add(
+            Label(
+                t1=segment.start,
+                t2=(segment.start + segment.duration)
+            )
+        )
+    lm = LabelManager()
+    for tier in tiermap.values():
+        lm.add(tier)
+    handle.write(lm.as_string(fmt='praat_short') + '\n')
+    
+def diarize(wavfile, pipeline, num_spkr, outfile):
     '''
     Diarize a .wav file using a pyannote-audio pipeline.
     '''
     diarization = pipeline(wavfile, num_speakers=2)
-    with open(rttmfile, 'w') as outfile:
-        diarization.write_rttm(outfile)
+    outfile = Path(outfile)
+    outfile.parent.mkdir(parents=True, exist_ok=True)
+    if outfile.suffix == '.rttm':
+        with open(outfile, 'w') as out:
+            diarization.write_rttm(out)
+    elif outfile.suffix == '.lab':
+        with open(outfile, 'w') as out:
+            diarization.write_lab(out)
+    elif outfile.suffix == '.eaf':
+        pass
+        # TODO: fill this out
+    elif outfile.suffix == '.TextGrid' or outfile.suffix == '.tg':
+        dur = librosa.get_duration(filename=wavfile)
+        with open(outfile, 'w') as out:
+            write_tg(diarization, dur, out)
 
 def diarize_df(df, pipeline, num_spkr, wavdir, rttmdir):
     for row in df.itertuples():
