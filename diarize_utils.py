@@ -124,7 +124,7 @@ def write_eaf():
                 eaf.add_annotation(tiername, int(row.t1_buf), int(row.t2_buf))
     return eaf
  
-def write_tg(diarization, dur, handle):
+def write_tg(diarization, dur, outfile):
     tiermap = {
         n: IntervalTier(name=n, start=0.0, end=dur) \
             for n in diarization.labels()
@@ -140,7 +140,8 @@ def write_tg(diarization, dur, handle):
     lm = LabelManager()
     for tier in tiermap.values():
         lm.add(tier)
-    handle.write(lm.as_string(fmt='praat_short') + '\n')
+    with open(outfile, 'w') as out:
+        out.write(lm.as_string(fmt='praat_short') + '\n')
     
 def diarize(wavfile, pipeline, num_spkr, outfile):
     '''
@@ -160,8 +161,7 @@ def diarize(wavfile, pipeline, num_spkr, outfile):
         # TODO: fill this out
     elif outfile.suffix == '.TextGrid' or outfile.suffix == '.tg':
         dur = librosa.get_duration(filename=wavfile)
-        with open(outfile, 'w') as out:
-            write_tg(diarization, dur, out)
+        write_tg(diarization, dur, outfile)
 
 def diarize_df(df, pipeline, num_spkr, wavdir, rttmdir):
     for row in df.itertuples():
