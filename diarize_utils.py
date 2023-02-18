@@ -2,8 +2,11 @@ import os, sys, subprocess
 import datetime
 from pathlib import Path
 import librosa
+import numpy as np
+import pandas as pd
+import pympi
 from phonlab.utils import dir2df
-from audiolabel import LabelManager, IntervalTier, Label
+from audiolabel import read_label, df2tg
 
 def compare_dirs(dir1, ext1, dir2, ext2):
     '''
@@ -32,32 +35,6 @@ def compare_dirs(dir1, ext1, dir2, ext2):
                .isna()].rename({'fname_1': 'fname'}, axis='columns') \
                .drop('fname_2', axis='columns') \
                .reset_index(drop=True)
-
-def mirror_dir(dir1, dir2):
-    '''
-    Mirror a directory's subdirectories in another directory.
-
-    dir1: path-like
-    The source directory to be mirrored.
-
-    dir2: path-like
-    The target directory where new subdirectories will be created.
-    
-    Notes
-    -----
-    This simple implementation is not efficient and may not be suitable for
-    large directory structures or for use with network file systems.
-    '''
-    dir1 = Path(dir1)
-    dir2 = Path(dir2)
-    proc = subprocess.run(
-        ['find', '.', '-type', 'd', '-depth'],
-        cwd=dir1,
-        capture_output=True,
-        text=True
-    )
-    for name in proc.stdout.splitlines():
-        (dir2 / name).mkdir(parents=True, exist_ok=True)
 
 def prep_audio(infile, outfile, chan='-'):
     '''
@@ -95,140 +72,161 @@ def prep_audio(infile, outfile, chan='-'):
         msg = f'Error while prepping audio file {infile}:\n{e}'
         raise subprocess.CalledProcessError(msg)
 
-#def _iter_eaf(diarization):
-#    for segment, _, label in diarization.itertracks(yield_label=True):
-#        if isinstance(label, Text) and " " in label:
-#                msg = (
-#                    f"Space-separated LAB file format does not allow labels "
-#                    f'containing spaces (got: "{label}").'
-#                )
-#                raise ValueError(msg)
-#            yield f"{segment.start:.3f} {segment.start + segment.duration:.3f} {label}\n"
-
-def write_eaf():
+def write_eaf(dfs, tiernames, outfile, speech_label, t1col, t2col):
+    '''
+    Write list of dataframes as tiers of an .eaf file.
+    
+    **TIMES IN MS***
+    '''
     eaf = pympi.Elan.Eaf()
     eaf.remove_tier('default')
-    eaf.add_language('yid')
-    for chan_s, rttmfile in rttms.items():
-        df = rttm2df(rttmfile)
-        for spkr in df['spkr'].cat.categories.sort_values():
-            try:
-                tiername = names[(chan_s, spkr)]
-            except KeyError:
-                tiername = f'{chan_s}_{spkr}'
-            eaf.add_tier(tiername, language='yid')
-            spkrdf = df[df['spkr'] == spkr].copy()
-            if buffer_ms is not None:
-                spkrdf = buffer_tier(spkrdf, buffer_ms)
-            for row in spkrdf.itertuples():
-                eaf.add_annotation(tiername, int(row.t1_buf), int(row.t2_buf))
-    return eaf
- 
-def write_tg(diarization, dur, outfile):
-    tiermap = {
-        n: IntervalTier(name=n, start=0.0, end=dur) \
-            for n in diarization.labels()
-    }
-    for segment, _, label in diarization.itertracks(yield_label=True):
-        labeltier = tiermap[label]
-        labeltier.add(
-            Label(
-                t1=segment.start,
-                t2=(segment.start + segment.duration)
+    for name, df in zip(tiernames, dfs):
+        eaf.add_tier(name)
+        for row in df.itertuples():
+            eaf.add_annotation(
+                name,
+                int(getattr(row, t1col)),
+                int(getattr(row, t2col)),
+                value=speech_label
             )
+    eaf.to_file(outfile)
+
+def diar2df(diarization, buffer_sec, speech_label=''):
+    '''
+    Convert a diarization to dataframes of annotation rows. Return a
+    tuple consisting of a list of dataframes that represent label tiers
+    and a list of corresponding tier names.    
+    '''
+    tiers = {}
+    for segment, _, label in diarization.itertracks(yield_label=True):
+        if label not in tiers.keys():
+            tiers[label] = []
+        tiers[label].append(
+            {
+                't1': segment.start,
+                't2': segment.start + segment.duration,
+                'text': speech_label
+            }
         )
-    lm = LabelManager()
-    for tier in tiermap.values():
-        lm.add(tier)
-    with open(outfile, 'w') as out:
-        out.write(lm.as_string(fmt='praat_short') + '\n')
-    
-def diarize(wavfile, pipeline, num_spkr, outfile):
-    '''
-    Diarize a .wav file using a pyannote-audio pipeline.
-    '''
-    diarization = pipeline(wavfile, num_speakers=2)
-    outfile = Path(outfile)
-    outfile.parent.mkdir(parents=True, exist_ok=True)
-    if outfile.suffix == '.rttm':
-        with open(outfile, 'w') as out:
-            diarization.write_rttm(out)
-    elif outfile.suffix == '.lab':
-        with open(outfile, 'w') as out:
-            diarization.write_lab(out)
-    elif outfile.suffix == '.eaf':
-        pass
-        # TODO: fill this out
-    elif outfile.suffix == '.TextGrid' or outfile.suffix == '.tg':
-        dur = librosa.get_duration(filename=wavfile)
-        write_tg(diarization, dur, outfile)
+    tnames = list(tiers.keys())
+    dflist = [
+        buffer_tier(
+            pd.DataFrame(tiers[name]),
+            buffer_sec
+        ) for name in tnames
+    ]
+    return (dflist, tnames)
 
-def diarize_df(df, pipeline, num_spkr, wavdir, rttmdir):
-    for row in df.itertuples():
-        wavfile = wavdir / row.relpath / row.fname
-        rttmfile = rttmdir / row.relpath / f'{row.barename}.rttm'
-        try:
-            diarize(wavfile, pipeline, num_spkr, rttmfile)
-        except Exception as e:
-            sys.stderr.write(f'Failed to diarize .wav file {wavfile}.')
-            sys.stderr.write(e)
-
-def rttm2df(rttmfile):
+def buffer_tier(tier, sec):
     '''
-    Load an .rttm file into a dataframe.
-    '''
-    df = pd.read_csv(
-        rttmfile,
-        sep=' ',
-        header=None,
-        usecols=[1, 3, 4, 7],
-        names=['fid', 't1', 'dur', 'spkr'],
-        converters={'t1': lambda x: float(x) * 1000, 'dur': lambda x: float(x) * 1000},
-        dtype={'fid': 'category', 'spkr': 'category'}
-    )
-    df['t2'] = df['t1'] + df['dur']
-    return df
-
-def buffer_tier(tier, msec):
-    '''
-    Buffer t1 and t2 in a tier by `msec` where possible.
+    Buffer t1 and t2 in a tier by `sec` where possible.
     # TODO: check for proper handling of starts/ends less than buf_ms from edges
     '''
-    tier['prev_t2'] = tier['t2'].shift(1, fill_value=np.max([tier.t1.min() - (2 * msec), 0]))
-    tier['next_t1'] = tier['t1'].shift(-1, fill_value=tier.t2.max())
-    # Check for overlapping speaker utterances. 
+    tier['prev_t2'] = \
+        tier['t2'].shift(
+            1,
+            fill_value=np.max([tier['t1'].min() - (2.0 * sec), 0])
+        )
+    tier['next_t1'] = tier['t1'].shift(-1, fill_value=tier['t2'].max())
+    # Doublecheck for overlapping speaker utterances. We expect to never find these.
     assert(np.all(tier['t1'] < tier['next_t1']))
     pregap_midpt = tier.loc[:, ['t1', 'prev_t2']].mean(axis=1)
     tier['t1_buf'] = np.max(
-        [tier['t1'] - msec, pregap_midpt],
+        [tier['t1'] - sec, pregap_midpt],
         axis=0
     )
     postgap_midpt = tier.loc[:, ['t2', 'next_t1']].mean(axis=1)
     tier['t2_buf'] = np.min(
-        [tier['t2'] + msec, postgap_midpt],
+        [tier['t2'] + sec, postgap_midpt],
         axis=0
     )
     return tier
 
-def rttm2eaf(rttms, buffer_ms=None, names={}):
+def diarize(wavfile, pipeline, outfile, num_speakers, buffer_sec, speech_label):
     '''
-    Convert left/right .rttm files to an .eaf, one tier per speaker per channel.
-    Buffer t1 and t2 in a tier by `buffer_ms` where possible.
+    Diarize a .wav file using a pyannote-audio pipeline.
     '''
-    eaf = pympi.Elan.Eaf()
-    eaf.remove_tier('default')
-    eaf.add_language('yid')
-    for chan_s, rttmfile in rttms.items():
-        df = rttm2df(rttmfile)
-        for spkr in df['spkr'].cat.categories.sort_values():
-            try:
-                tiername = names[(chan_s, spkr)]
-            except KeyError:
-                tiername = f'{chan_s}_{spkr}'
-            eaf.add_tier(tiername, language='yid')
-            spkrdf = df[df['spkr'] == spkr].copy()
-            if buffer_ms is not None:
-                spkrdf = buffer_tier(spkrdf, buffer_ms)
-            for row in spkrdf.itertuples():
-                eaf.add_annotation(tiername, int(row.t1_buf), int(row.t2_buf))
-    return eaf
+    diarization = pipeline(wavfile, num_speakers=num_speakers)
+    dfs, tiernames = diar2df(
+        diarization,
+        buffer_sec=buffer_sec,
+        speech_label=speech_label
+    )
+    outfile = Path(outfile)
+    outfile.parent.mkdir(parents=True, exist_ok=True)
+    if outfile.suffix == '.eaf':
+        # Scale seconds to milliseconds for .eaf output.
+        tcols = ['t1_buf', 't2_buf']
+        for df in dfs:
+            df.loc[:, tcols] = df.loc[:, tcols] * 1000
+        write_eaf(dfs, tiernames, outfile, speech_label, *tcols)
+    elif outfile.suffix == '.TextGrid':
+        dur = librosa.get_duration(filename=wavfile)
+        df2tg(
+            dfs,
+            tnames=tiernames,
+            lbl='text', t1='t1_buf', t2='t2_buf',
+            start=0.0, end=dur,
+            outfile=outfile
+        )
+
+def sort_tiers(annodir, chans, stereodir, relpath, fname):
+    '''
+    Load left/right diarized label tiers into dataframes and sort them
+    according to total duration of utterances within the tier. Also load
+    stereo audio data and secondarily sort dataframes according to the
+    mean sample magnitude of the audio corresponding to the utterances
+    in the tier.
+    '''
+    stereowav = (stereodir/relpath/fname).with_suffix('.wav')
+    data, rate = librosa.load(stereowav, sr=None, mono=False)
+    spkrchans = []
+    tiers = []
+    if fname.endswith('TextGrid'):
+        ftype = 'praat'
+        tscale = 1
+    else:
+        ftype = 'eaf'
+        tscale = 0.001
+    for cidx, chan in enumerate(chans):
+        dfs = read_label(
+            annodir/chan/relpath/fname,
+            ftype=ftype
+        )
+        for df in dfs:
+            # Add t1/t2 as sample indexes rather than times.
+            idxdf = pd.DataFrame({
+                't1idx': (df['t1'] * tscale * rate).astype(int),
+                't2idx': (df['t2'] * tscale * rate).astype(int)
+            })
+            # Collect all sample indexes that occur during the labels.
+            uttidx = np.hstack(
+                [np.arange(r.t1idx, r.t2idx) for r in idxdf.itertuples()]
+            )
+            # Calculate duration of all labels.
+            dur = (df['t2'] - df['t1']).sum()
+            avgmag = np.abs(data[cidx, uttidx]).sum() / dur
+            spkrchans.append(
+                {'totdur': dur, 'avgmag': avgmag, 'chan': chan}
+            )
+            tiers.append(df)
+    spkrdf = pd.DataFrame(spkrchans).sort_values('totdur')
+    try:
+        assert(len(spkrdf) == 4)   # Two channels, two speakers
+        # Interviewer should be least active talker (shortest duration)
+        interviewer = spkrdf[0:2].sort_values('avgmag')
+        subject = spkrdf[2:4].sort_values('avgmag')
+        # Each speaker should appear exactly once per channel.
+        assert(np.all(interviewer['chan'].duplicated() == False))
+        assert(np.all(subject['chan'].duplicated() == False))
+        sortidx = list(interviewer.index) + list(subject.index)
+        tiers = [tiers[i] for i in sortidx]
+        tiernames = [
+            'Interviewer unlikely', 'Interviewer probable',
+            'Subject unlikely', 'Subject probable'
+        ]
+    except AssertionError:
+        # Leave tier order unchanged and use 'unknown' names.
+        tiernames = ['unknown_0', 'unknown_1', 'unknown_2', 'unknown_3']
+    # Return tiers and names according to sort order.
+    return tiers, tiernames
