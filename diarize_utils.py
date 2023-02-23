@@ -12,8 +12,32 @@ def compare_dirs(dir1, ext1, dir2, ext2):
     '''
     Recursively compare two directories for matching files in one-to-one
     correspondence and return names from the first that do not have a
-    match in the second. Files match if their relative path and filename without
-    extension are identical.
+    match in the second. Files match if their relative path and filename
+    without extension are identical.
+
+    Parameters
+    ----------
+
+    dir1 : path-like
+        The directory path that is the source of comparison.
+    ext1 : str
+        The filename extension used to filter results from `dir1`. Only
+        filenames that end with `ext1` are included in the results.
+    dir2 : path-like
+        The directory path that is the target of comparison.
+    ext2 : str
+        The filename extension used to filter results from `dir2`.
+
+    Returns
+    -------
+    dataframe
+        The results dataframe contains one row per filename with
+        extension `ext1` that is found in `dir1` and does *not* have a
+        corresponding file with extension `ext2` found in `dir2`.
+        The columns of this dataframe are `relpath`, `fname`, and `barename`.
+        The `relpath` value is the relative path from `dir1` to the
+        file named by `fname`. The `barename` column contains the filename
+        without its extension.
     '''
     dir1 = Path(dir1)
     if ext1 != '':
@@ -39,28 +63,32 @@ def compare_dirs(dir1, ext1, dir2, ext2):
 def prep_audio(infile, outfile, chan='-'):
     '''
     Prepare an audio file for diarization by resampling and converting to mono
-    by extracting a channel or mixing down all channels.
+    by extracting a channel or mixing down all channels, using the `sox`
+    commandline utility.
     
     Parameters
     ----------
     
-    infile: path-like
-    The input audio file path. The input audio can be any file type supported by sox.
-    
-    outfile: path-like
-    The output audio file path.
-    
-    chan: int or '-' (default '-')
-    For a multichannel input file, the channel to extract for `outfile`. The special
-    string value `-` will cause all input channels to mix down to mono. The int value
-    may be specified as int or str type. For stereo the left channel is `1`, and the
-    right channel is '2'.
+    infile : path-like
+        The input audio file path. The input audio can be any file type
+        supported by `sox`.
+    outfile : path-like
+        The output audio file path.
+    chan : int or '-' (default '-')
+        For a multichannel input file, the channel to extract for `outfile`. The
+        special string value `-` will cause all input channels to mix down to
+        mono. The int value may be specified as int or str type. For stereo the
+        left channel is `1`, and the right channel is '2'.
     
     Returns
     -------
     
-    No value is returned from this function. A CalledProcessError will be raised if
-    the sox call fails.
+    No value is returned from this function.
+
+    Errors
+    ------
+
+    A CalledProcessError will be raised if the `sox` subprocess call fails.
     '''
     outfile.parent.mkdir(parents=True, exist_ok=True)
     soxargs = [
@@ -75,8 +103,32 @@ def prep_audio(infile, outfile, chan='-'):
 def write_eaf(dfs, tiernames, outfile, speech_label, t1col, t2col):
     '''
     Write list of dataframes as tiers of an .eaf file.
+
+    Parameters
+    ----------
+
+    dfs : list of dataframes
+        The dataframes representing annotation tiers to be written to an
+        `.eaf` file.
+    tiernames : list of str
+        The tier names to be written to the `.eaf` file.
+    outfile : path-like
+        The filename to use to write the `.eaf` file.
+    speech_label : str
+        The string to use as the label content for the label rows in the
+        dataframes in `dfs`. For diarization tasks it is normally best
+        to use the empty string '' for this value for `.eaf` outputs.
+    t1col : str
+        The name of the column in the dataframes where the `t1` start value
+        is found.
+    t2col : str
+        The name of the column in the dataframes where the `t2` end value
+        is found.
+
+    Returns
+    -------
     
-    **TIMES IN MS***
+    No value is returned from this function.
     '''
     eaf = pympi.Elan.Eaf()
     eaf.remove_tier('default')
@@ -93,9 +145,32 @@ def write_eaf(dfs, tiernames, outfile, speech_label, t1col, t2col):
 
 def diar2df(diarization, buffer_sec, speech_label=''):
     '''
-    Convert a diarization to dataframes of annotation rows. Return a
-    tuple consisting of a list of dataframes that represent label tiers
-    and a list of corresponding tier names.    
+    Convert a pyannote diarization to a list of dataframes that contain
+    the speech regions associated with a speaker. There is one dataframe
+    per speaker.
+
+    Parameters
+    ----------
+
+    diarization : pipeline output
+        The output of a `pyannote-audio` `SpeakerDiarization` pipeline.
+    buffer_sec : float
+        The amount of time in seconds to pad the identified speech regions
+        found by diarization. If the padding would create an overlap with
+        another speech region, the midpoint of gap between the regions is used
+        instead.
+    speech_label : str (default '')
+        The string to use as the label content for the label rows in the
+        dataframes in `dfs`.
+
+    Returns
+    -------
+    tuple consisting of:
+        list of dataframes
+            Each dataframe contains rows that represent speech regions for
+            a speaker identified in the diarization.
+        list of str
+            The list of tier names that correspond to the dataframes.
     '''
     tiers = {}
     for segment, _, label in diarization.itertracks(yield_label=True):
@@ -120,7 +195,22 @@ def diar2df(diarization, buffer_sec, speech_label=''):
 def buffer_tier(tier, sec):
     '''
     Buffer t1 and t2 in a tier by `sec` where possible.
-    # TODO: check for proper handling of starts/ends less than buf_ms from edges
+
+    Parameters
+    ----------
+
+    tier : dataframe
+        A dataframe representing rows of speech regions.
+    sec : float
+        The amount of time in seconds to pad the speech regions.
+        If the padding would create an overlap with another speech region,
+        the midpoint of gap between the regions is used instead.
+
+    Returns
+    -------
+    dataframe
+        The original dataframe with new columns `t1_buf` and `t2_buf`, which
+        contain the buffered times for `t1` and `t2`.
     '''
     tier['prev_t2'] = \
         tier['t2'].shift(
@@ -145,6 +235,32 @@ def buffer_tier(tier, sec):
 def diarize(wavfile, pipeline, outfile, num_speakers, buffer_sec, speech_label):
     '''
     Diarize a .wav file using a pyannote-audio pipeline.
+
+    Parameters
+    ----------
+
+    wavfile : path-like
+        The input `.wav` file to diarize.
+    pipeline : `pyannote-audio` `SpeakerDiarization` pipeline
+        An instantiation of a `pyannote-audio` `SpeakerDiarization` pipeline.
+    outfile : path-like
+        The filename to use to write the diarization output. The filename must
+        end with an `.eaf` (ELAN) or `.TextGrid` (Praat) extension.
+    num_speakers : int
+        The number of speakers to be diarized.
+    buffer_sec : float
+        The amount of time in seconds to pad the identified speech regions
+        found by diarization. If the padding would create an overlap with
+        another speech region, the midpoint of gap between the regions is used
+        instead.
+    speech_label : str
+        The string to use as the label content for the label rows in the
+        dataframes in `dfs`.
+
+    Returns
+    -------
+    
+    No value is returned from this function.
     '''
     diarization = pipeline(wavfile, num_speakers=num_speakers)
     dfs, tiernames = diar2df(
@@ -172,11 +288,36 @@ def diarize(wavfile, pipeline, outfile, num_speakers, buffer_sec, speech_label):
 
 def sort_tiers(annodir, chans, stereodir, relpath, fname):
     '''
-    Load left/right diarized label tiers into dataframes and sort them
+    Combine left/right diarized label tiers into dataframes and sort them
     according to total duration of utterances within the tier. Also load
     stereo audio data and secondarily sort dataframes according to the
     mean sample magnitude of the audio corresponding to the utterances
     in the tier.
+
+    Parameters
+    ----------
+
+    annodir : path-like
+        Base directory where input annotation files (`.eaf` or `.TextGrid`) are
+        found in per-channel subdirectories.
+    chans : list of str
+        The names of the channel subdirectories. This is combined with
+        `annodir` to create a channel-specific path.
+    stereodir : path-like
+        The base directory where stereo audio input files are found.
+    relpath : str
+        The relative path from a channel directory to an annotation file.
+    fname : str
+        The filename of a `left` or `right` annotation file.
+
+    Returns
+    -------
+    tuple consisting of:
+        list of dataframes
+            Each dataframe contains rows that represent speech regions for
+            a speaker identified in the diarization.
+        list of str
+            The list of tier names that correspond to the dataframes.
     '''
     stereowav = (stereodir/relpath/fname).with_suffix('.wav')
     data, rate = librosa.load(stereowav, sr=None, mono=False)
