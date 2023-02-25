@@ -1,5 +1,0 @@
-pympi-ling
-pyannote.audio==2.1.1
-speechbrain
-git+https://github.com/rsprouse/audiolabel
-git+https://github.com/rsprouse/phonlab
