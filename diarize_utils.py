@@ -232,7 +232,8 @@ def buffer_tier(tier, sec):
     )
     return tier
 
-def diarize(wavfile, pipeline, outfile, num_speakers, buffer_sec, speech_label):
+def diarize(wavfile, pipeline, outfile, num_speakers, buffer_sec, speech_label,
+    fill_gaps):
     '''
     Diarize a .wav file using a pyannote-audio pipeline.
 
@@ -256,6 +257,9 @@ def diarize(wavfile, pipeline, outfile, num_speakers, buffer_sec, speech_label):
     speech_label : str
         The string to use as the label content for the label rows in the
         dataframes in `dfs`.
+    fill_gaps : str or None
+        The string value to use as the `fill_gaps` value passed to `df2tg`.
+        If None, no non-speech intervals are interpolated into an output TextGrid.
 
     Returns
     -------
@@ -283,6 +287,7 @@ def diarize(wavfile, pipeline, outfile, num_speakers, buffer_sec, speech_label):
             tnames=tiernames,
             lbl='text', t1='t1_buf', t2='t2_buf',
             start=0.0, end=dur,
+            fill_gaps=fill_gaps,
             outfile=outfile
         )
 
